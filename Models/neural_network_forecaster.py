@@ -1,112 +1,120 @@
-import numpy as np
-import pandas as pd
-import yfinance as yf
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from tf_keras.models import Sequential
-from tf_keras.layers import Dense, Dropout, LSTM
-from tf_keras.callbacks import EarlyStopping
-import tensorflow as tf
-import plotly.graph_objs as go
+"""Train a fresh LSTM and compare it with the previous close on a holdout."""
+
+import argparse
 from pathlib import Path
 
-# Set a seed for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
+import numpy as np
+import pandas as pd
 
-# Define stock data retrieval parameters
-start_date = '2000-01-01'
-end_date = '2024-10-23'  # fixed invalid date from original
-stock_symbol = 'MSFT'
-
-# Download stock data
-data = yf.download(stock_symbol, start=start_date, end=end_date, progress=False, auto_adjust=True)
-
-# Reset index and drop missing values
-data.reset_index(inplace=True)
-data.dropna(inplace=True)
-
-# Calculate moving averages
-data['MA100'] = data['Close'].rolling(100).mean()
-data['MA200'] = data['Close'].rolling(200).mean()
-
-# Split data into train and test sets
-train_size = int(len(data) * 0.8)
-train_data = data[:train_size]
-test_data = data[train_size:]
-
-# Apply MinMaxScaler
-scaler = MinMaxScaler(feature_range=(0, 1))
-train_scaled = scaler.fit_transform(train_data[['Close']])
-test_scaled = scaler.transform(test_data[['Close']])
-
-# Prepare training and test sets
-def create_dataset(data, look_back=100):
-    X, Y = [], []
-    for i in range(len(data) - look_back):
-        X.append(data[i:(i + look_back), 0])
-        Y.append(data[i + look_back, 0])
-    return np.array(X), np.array(Y)
-
-x_train, y_train = create_dataset(train_scaled)
-x_test, y_test = create_dataset(test_scaled)
-
-# Reshape input to be [samples, timesteps, features]
-x_train = x_train.reshape((x_train.shape[0], x_train.shape[1], 1))
-x_test = x_test.reshape((x_test.shape[0], x_test.shape[1], 1))
-
-# Build LSTM model
-model = Sequential([
-    LSTM(50, return_sequences=True, input_shape=(x_train.shape[1], 1)),
-    Dropout(0.2),
-    LSTM(50),
-    Dropout(0.2),
-    Dense(1)
-])
-
-model.compile(optimizer='adam', loss='mse')
-
-# EarlyStopping callback to prevent overfitting
-early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-
-# Fit the model (use a validation split to monitor validation loss)
-history = model.fit(
-    x_train, y_train,
-    epochs=100,
-    batch_size=32,
-    verbose=1,
-    validation_split=0.2,
-    callbacks=[early_stopping]
+from sequence_modeling import (
+    LOOKBACK,
+    clean_history,
+    download_history,
+    fit_scaler,
+    predict_prices,
+    sample_prices,
+    windows_for_targets,
 )
 
-# Ensure output directory exists and save the trained model
-out_dir = Path('Models')
-out_dir.mkdir(parents=True, exist_ok=True)
-model_path = out_dir / 'neural_forecaster.keras'
-model.save(model_path)
 
-# Predictions on test set
-y_pred = model.predict(x_test, verbose=0)
+def prepare_holdout(close, lookback=LOOKBACK):
+    """Split targets 70/15/15 by time and fit scaling on training data only."""
+    count = len(close)
+    train_end = int(count * 0.70)
+    validation_end = int(count * 0.85)
+    if train_end <= lookback or validation_end <= train_end or validation_end >= count:
+        raise ValueError(f"Not enough rows for a {lookback}-observation window and a 70/15/15 split.")
 
-# Inverse transform the predictions and actual values
-y_pred = scaler.inverse_transform(y_pred)
-y_test = scaler.inverse_transform(y_test.reshape(-1, 1))
+    scaler = fit_scaler(close, train_end)
+    scaled = scaler.transform(close.to_numpy().reshape(-1, 1))
+    train = windows_for_targets(scaled, np.arange(lookback, train_end), lookback)
+    validation = windows_for_targets(scaled, np.arange(train_end, validation_end), lookback)
+    test_indices = np.arange(validation_end, count)
+    test = windows_for_targets(scaled, test_indices, lookback)
+    return scaler, train_end, validation_end, train, validation, test_indices, test
 
-# Calculate evaluation metrics
-mae = mean_absolute_error(y_test, y_pred)
-mse = mean_squared_error(y_test, y_pred)
-print("Neural Network Mean Absolute Error (MAE):", mae)
-print("Neural Network Mean Squared Error (MSE):", mse)
 
-# Plot original vs predicted prices using Plotly
-test_dates = test_data['Date'][100:]  # Adjusting date alignment for plotting
-fig3 = go.Figure()
-fig3.add_trace(go.Scatter(x=test_dates, y=y_test.flatten(), mode='lines', name='Original Price'))
-fig3.add_trace(go.Scatter(x=test_dates, y=y_pred.flatten(), mode='lines', name='Predicted Price'))
-fig3.update_layout(
-    title='Neural Network - Original vs Predicted Prices',
-    xaxis_title='Date',
-    yaxis_title='Price'
-)
-# Note: In headless environments this won't render, but keeping for local use
-# fig3.show()
+def benchmark(close, epochs):
+    import keras
+    import tensorflow as tf
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+    keras.utils.set_random_seed(42)
+    scaler, train_end, validation_end, train, validation, indices, test = prepare_holdout(close)
+    model = keras.Sequential([
+        keras.Input(shape=(LOOKBACK, 1)),
+        keras.layers.LSTM(50, return_sequences=True),
+        keras.layers.Dropout(0.2),
+        keras.layers.LSTM(50),
+        keras.layers.Dropout(0.2),
+        keras.layers.Dense(1),
+    ])
+    model.compile(optimizer="adam", loss="mse")
+
+    def dataset(split):
+        options = tf.data.Options()
+        options.threading.private_threadpool_size = 1
+        return tf.data.Dataset.from_tensor_slices(split).batch(32).with_options(options)
+
+    model.fit(
+        dataset(train), validation_data=dataset(validation), epochs=epochs, verbose=0, shuffle=False,
+        callbacks=[keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=5, restore_best_weights=True
+        )],
+    )
+
+    values = close.to_numpy()
+    actual = values[indices]
+    predictions = {
+        "LSTM": predict_prices(model, test[0], scaler),
+        "Previous close": values[indices - 1],
+    }
+    print(f"Training ends: {close.index[train_end - 1]:%Y-%m-%d}")
+    print(f"Validation ends: {close.index[validation_end - 1]:%Y-%m-%d}")
+    print(f"Holdout: {close.index[indices[0]]:%Y-%m-%d} to {close.index[-1]:%Y-%m-%d} ({len(indices)} observations)")
+    for name, forecast in predictions.items():
+        mae = mean_absolute_error(actual, forecast)
+        rmse = mean_squared_error(actual, forecast) ** 0.5
+        print(f"{name}: MAE={mae:.4f}, RMSE={rmse:.4f}")
+    return model
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sample", action="store_true", help="Use the synthetic offline data.")
+    source.add_argument("--csv", type=Path, help="Read a CSV with Date and Close columns.")
+    source.add_argument("--ticker", help="Download daily adjusted prices with yfinance.")
+    parser.add_argument("--start", default="2000-01-01")
+    parser.add_argument("--end", default="2024-10-23", help="Exclusive download end date.")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--output", type=Path, help="Optional path to save the newly trained model.")
+    args = parser.parse_args()
+    if args.epochs < 1:
+        parser.error("--epochs must be at least 1")
+    if args.output and (args.output.suffix != ".keras" or args.output.exists()):
+        parser.error("--output must be a new .keras file")
+
+    try:
+        if args.sample:
+            history = sample_prices()
+            print("Source: synthetic sample (not market performance)")
+        elif args.csv:
+            history = clean_history(pd.read_csv(args.csv, index_col="Date"))
+            print(f"Source: {args.csv}")
+        else:
+            ticker = args.ticker.strip().upper()
+            start, end = pd.Timestamp(args.start).date(), pd.Timestamp(args.end).date()
+            history = download_history(ticker, start, end)
+            print(f"Source: Yahoo Finance adjusted daily closes for {ticker}")
+        model = benchmark(history["Close"], args.epochs)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        model.save(args.output)
+
+
+if __name__ == "__main__":
+    main()

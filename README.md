@@ -1,105 +1,87 @@
-# LSTM Stock Price Predictor
+# LSTM Equity Sequence Modeling
 
-> **Disclaimer**: Stock price prediction is inherently uncertain. This app is for educational purposes only and **not** investment advice.
+Explore closing-price sequences with a Streamlit demo, then train a fresh LSTM
+and compare it with a **previous-close baseline**. The demo opens on synthetic
+data and works without a market data connection or an API key after installation.
 
-LSTM Stock Price Predictor is a Streamlit application that predicts stock prices using an LSTM model and visualizes stock data with interactive Plotly charts.
+**[Interactive demo](https://lstm-stock-price-predictor.streamlit.app/)** ·
+**[Run the benchmark locally](#reproduce-the-holdout-benchmark)**
 
-![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)
+![Streamlit demo showing synthetic closing prices and a separate historical LSTM replay chart](docs/lstm-demo.png)
 
-## Quick Links
+## Quick start
 
-- **Live Demo**: <https://lstm-stock-price-predictor.streamlit.app/>
-- **Last Model Training**: October 23, 2024
+Use **Python 3.12** on 64-bit Windows or Linux, or on Apple Silicon macOS,
+matching [`.python-version`](.python-version).
+Install the dependencies from [`requirements.txt`](requirements.txt).
 
-## Overview
-
-LSTM Stock Price Predictor provides a simple UI for technical analysis and predictive modeling of stock prices. The app uses a TensorFlow LSTM to forecast future prices from historical data.
-
-## Features
-
-- **Historical data via Yahoo Finance** with robust download (handles MultiIndex columns and timezone quirks)
-- **Charts**: Close price with MA100 & MA200, candlesticks (when OHLC available), and volume
-- **Modeling**: LSTM-based predictions, actual vs. predicted comparison, MAE/MSE metrics, and a 30?day forecast
-
-## Architecture
-
-- **Frontend**: Streamlit
-- **Data**: Pandas, NumPy, scikit-learn
-- **Model**: TensorFlow (LSTM)
-- **Viz**: Plotly
-
-## Installation
-
-### Prerequisites
-
-- Python 3.9+
-- `pip`
-
-### Setup
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/0xmrpinheiro/lstm-stock-price-predictor.git
-   cd lstm-stock-price-predictor
-   ```
-
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. (Option A) **Use an existing model file**  
-   Place the trained model at:
-
-   ```
-   Models/neural_forecaster.keras
-   ```
-
-   (Option B) **Train a new model locally**  
-
-   ```bash
-   python neural_network_forecaster.py
-   ```
-
-   This will save `Models/neural_forecaster.keras`.
-
-4. Run the app:
-
-   ```bash
-   streamlit run streamlit_app.py
-   ```
-
-5. Open `http://localhost:8501` in your browser.
-
-## Configuration
-
-No manual environment variables required. The app suppresses TF logs internally (`TF_CPP_MIN_LOG_LEVEL=3`).
-
-## Troubleshooting
-
-- **Empty/odd charts or “MSFT” headers under columns**: This happens when Yahoo returns MultiIndex columns. The app now flattens/cleans columns automatically.
-- **“No timezone found, symbol may be delisted”**: Caused by Yahoo metadata. Using a recent `yfinance` version and our robust downloader resolves it.
-
-## Dependencies
-
-> Production pins used by the app
-
-```
-streamlit==1.25.0
-scikit-learn==1.3.0
-tensorflow==2.13.0
-plotly==5.15.0
-numpy==1.23.5
-pandas==1.5.3
-yfinance>=0.2.40
+```sh
+git clone https://github.com/0xmrpinheiro/lstm-equity-sequence-modeling.git
+cd lstm-equity-sequence-modeling
 ```
 
-## License
+**macOS / Linux**
 
-GPL-3.0 — see [LICENSE](LICENSE).
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m streamlit run streamlit_app.py
+```
 
-## Contributing
+**Windows PowerShell**
 
-PRs welcome!
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+
+Open `http://localhost:8501`. The bundled Keras model is loaded automatically.
+Choose **Yahoo Finance** in the sidebar to download adjusted daily prices for
+a ticker. The end date is exclusive. No download is required for the sample.
+
+## Demo versus benchmark
+
+The app shows a **historical replay**, not measured forecasting skill. It reuses
+the bundled model and adapts the input scale using an initial portion of the
+selected history. The resulting chart does not establish that the model
+generalizes to another ticker or time period. The app does not present replay
+errors or a multi-day projection as a performance result.
+
+## Reproduce the holdout benchmark
+
+From the repository root with the virtual environment active, run the offline
+example first:
+
+```sh
+python -m Models.neural_network_forecaster --sample --epochs 1
+```
+
+Then use a fixed CSV (`Date` and `Close` columns) or download a specified date
+range. Save the CSV if you need to reproduce the same observations later.
+
+```sh
+python -m Models.neural_network_forecaster --csv prices.csv
+python -m Models.neural_network_forecaster --ticker MSFT --start 2000-01-01 --end 2024-10-23
+```
+
+1. Split the series in chronological order: 70% training, 15% validation, 15% test.
+2. Fit the scaler on training closes only. Each prediction uses the preceding
+   100 closes. Validation selects when to stop training.
+3. Compare one-step MAE and RMSE for the new LSTM and the previous-close
+   baseline on the same holdout dates. Each test step may use earlier observed
+   holdout closes; this is not a recursive multi-step forecast.
+
+The benchmark does not use or replace the bundled artifact. To keep a newly
+trained model, pass `--output` with a new `.keras` path. Synthetic scores only
+check the workflow. No results here establish investment performance.
+
+## Tests
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The app smoke test loads the bundled model and renders the offline example.
+CI also trains for one epoch and verifies that the benchmark runs without
+Yahoo Finance. Licensed under [GPL-3.0](LICENSE).
